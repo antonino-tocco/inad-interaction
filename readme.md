@@ -1,6 +1,6 @@
 # INAD INTERACTION PA
 
-This package provide tool to INAD (Indice Nazionale dei Domicili Digitali).
+This package provide tool to interact to INAD (Indice Nazionale dei Domicili Digitali).
 
 It allows to interact with INAD API to manage digital addresses.
 
