@@ -119,11 +119,11 @@ def main(voucher: str = None, fiscal_codes_file: str = None, output_file: str = 
             try:
                 pec = retrieve_domicilio_digitale(voucher, fiscal_code)
                 if pec is not None and pec != 'N/A':
-                    df.at[index, 'PEC'] = pec
+                    df.at[index, pec_field] = pec
                     counter += 1
             except Exception as e:
                 # print(f"Error retrieving PEC for fiscal code {fiscal_code}: {e}")
-                df.at[index, 'PEC'] = ''
+                df.at[index, pec_field] = ''
     print(f"Number of PECs retrieved: {counter}")
     if output_file is not None and os.path.exists(output_file) and os.path.isfile(output_file):
         os.remove(output_file)
