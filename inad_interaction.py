@@ -11,6 +11,12 @@ from argparse import ArgumentParser
 from jose import jwt
 from jose.constants import Algorithms
 from uuid import uuid4
+from helpers import (
+    validate_partita_iva,
+    validate_fiscal_code,
+    retrieve_domicilio_digitale,
+    retrieve_pec_from_openapi
+)
 
 
 dotenv.load_dotenv()
@@ -80,76 +86,145 @@ def retrieve_voucher(priv_key_path: str):
         raise Exception(f"Unable to retrieve voucher - Status code: {result.status_code}")
 
 
-def retrieve_domicilio_digitale(voucher: str, fiscal_code: str):
-    """
-    Retrieve the digital domicile for a given fiscal code using the provided voucher.
-    :param voucher:
-    :param fiscal_code:
-    :return:
-    """
-    assert(voucher is not None and fiscal_code is not None)
-    url = f"https://api.inad.gov.it/rest/inad/v1/domiciliodigitale/extract/{fiscal_code}?practicalReference={uuid4()}"
-    response = requests.get(url, headers={'Authorization': f'Bearer {voucher}'})
-    if response.status_code == 200:
-        result = response.json()
-        data = result.get('digitalAddress', [])
-        if not data:
-            return 'No digital domicile found for this fiscal code'
-        # Assuming the digital domicile is stored under the key 'domicilioDigitale'
+def main(voucher: str = None, input_file: str = None, output_file: str = None, fiscal_code_field: str = None, p_iva_field: str = None, pec_field: str = 'PEC'):
+    assert (voucher is not None and input_file is not None)
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"The file {input_file} does not exist.")
 
-        if len(data) > 0:
-            domicilio_digitale = data[0].get('digitalAddress', 'N/A')
-            return domicilio_digitale
-    else:
-        raise Exception(f"Unable to retrieve digital domicile data for {fiscal_code} - Status code: {response.status_code}")
-
-
-def main(voucher: str = None, fiscal_codes_file: str = None, output_file: str = None, fiscal_code_field: str = 'codice fiscale', pec_field: str = 'PEC'):
-    assert (voucher is not None and fiscal_codes_file is not None)
-    if not os.path.exists(fiscal_codes_file):
-        raise FileNotFoundError(f"The file {fiscal_codes_file} does not exist.")
-
-    df = pd.read_excel(fiscal_codes_file, dtype=str)
+    df = pd.read_excel(input_file, dtype=str)
     counter = 0
+    counter_inad = 0
+    counter_openapi = 0
+    print(f"Processing file: {input_file}, total rows: {len(df)}")
+
     for index, row in df.iterrows():
-        fiscal_code = row[fiscal_code_field]
-        pec = row[pec_field]
-        # Check if PEC is empty or NaN
-        if not pd.isna(fiscal_code) and pd.isna(pec):
-            try:
-                pec = retrieve_domicilio_digitale(voucher, fiscal_code)
-                if pec is not None and pec != 'N/A':
-                    df.at[index, pec_field] = pec
-                    counter += 1
-            except Exception as e:
-                # print(f"Error retrieving PEC for fiscal code {fiscal_code}: {e}")
-                df.at[index, pec_field] = ''
-    print(f"Number of PECs retrieved: {counter}")
+        fiscal_code = row[fiscal_code_field] if fiscal_code_field in df.columns and not pd.isna(row[fiscal_code_field]) else None
+        p_iva = row[p_iva_field] if p_iva_field in df.columns and not pd.isna(row[p_iva_field]) else None
+        pec = row[pec_field] if pec_field in df.columns and not pd.isna(row[pec_field]) else None
+
+        # Skip if PEC already exists
+        if pec:
+            continue
+
+        # Skip if both fiscal_code and p_iva are missing
+        if not fiscal_code and not p_iva:
+            continue
+
+        try:
+            retrieved_pec = None
+
+            # Clean and validate fiscal code
+            if fiscal_code:
+                fiscal_code = str(fiscal_code).strip()
+
+            # Clean and validate p_iva
+            if p_iva:
+                p_iva = str(p_iva).strip()
+
+            # PRIORITY 1: Always try fiscal code first with INAD (FREE)
+            # Try fiscal_code field if it's 16 characters
+            if fiscal_code and validate_fiscal_code(fiscal_code):
+                try:
+                    retrieved_pec = retrieve_domicilio_digitale(voucher, fiscal_code)
+                    if retrieved_pec:
+                        df.at[index, pec_field] = retrieved_pec
+                        print(f"[INAD/FREE] Retrieved PEC for fiscal code {fiscal_code}: {retrieved_pec}")
+                        counter += 1
+                        counter_inad += 1
+                        continue
+                except Exception as e:
+                    print(f"[INAD] Lookup failed for {fiscal_code}: {str(e)}")
+
+            # Try p_iva field if it's 16 characters (could be a fiscal code)
+            if p_iva and validate_fiscal_code(p_iva):
+                try:
+                    retrieved_pec = retrieve_domicilio_digitale(voucher, p_iva)
+                    if retrieved_pec:
+                        df.at[index, pec_field] = retrieved_pec
+                        print(f"[INAD/FREE] Retrieved PEC for fiscal code (from P.IVA field) {p_iva}: {retrieved_pec}")
+                        counter += 1
+                        counter_inad += 1
+                        continue
+                except Exception as e:
+                    print(f"[INAD] Lookup failed for {p_iva}: {str(e)}")
+
+            # PRIORITY 2: Try OpenAPI with Partita IVA (PAID - after free INAD attempts)
+            # Try p_iva field if it's 11 digits
+            if p_iva and validate_partita_iva(p_iva):
+                try:
+                    retrieved_pec = retrieve_pec_from_openapi(p_iva)
+                    if retrieved_pec:
+                        df.at[index, pec_field] = retrieved_pec
+                        print(f"[OpenAPI/PAID] Retrieved PEC for P.IVA {p_iva}: {retrieved_pec}")
+                        counter += 1
+                        counter_openapi += 1
+                        continue
+                except Exception as e:
+                    print(f"[OpenAPI] Lookup failed for {p_iva}: {str(e)}")
+
+            # Try fiscal_code field if it's 11 digits (could be a P.IVA)
+            if fiscal_code and validate_partita_iva(fiscal_code):
+                try:
+                    retrieved_pec = retrieve_pec_from_openapi(fiscal_code)
+                    if retrieved_pec:
+                        df.at[index, pec_field] = retrieved_pec
+                        print(f"[OpenAPI/PAID] Retrieved PEC for P.IVA (from fiscal_code field) {fiscal_code}: {retrieved_pec}")
+                        counter += 1
+                        counter_openapi += 1
+                        continue
+                except Exception as e:
+                    print(f"[OpenAPI] Lookup failed for {fiscal_code}: {str(e)}")
+
+            # If nothing worked, mark as empty
+            df.at[index, pec_field] = ''
+
+        except Exception as e:
+            print(f"Error processing row {index}: {str(e)}")
+            df.at[index, pec_field] = ''
+
+    print(f"\n=== Summary ===")
+    print(f"Total PECs retrieved: {counter}")
+    print(f"  - From INAD (fiscal codes): {counter_inad}")
+    print(f"  - From OpenAPI (P.IVA): {counter_openapi}")
+
     if output_file is not None and os.path.exists(output_file) and os.path.isfile(output_file):
         os.remove(output_file)
     if output_file is None:
-        base_output_file = os.path.splitext(fiscal_codes_file)[0]
+        base_output_file = os.path.splitext(input_file)[0]
         output_file = f"{base_output_file}_updated.xlsx"
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+    # Create output directory if it doesn't exist
+    output_dir = os.path.dirname(output_file)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
     df.to_excel(output_file, index=False)
+    print(f"Output saved to: {output_file}")
 
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="Retrieve Digital Domicile for given fiscal codes")
     parser.add_argument('--priv_key_path', type=str, required=True, help="Path to the private key file")
     parser.add_argument('--fiscal_code', type=str, required=False, help="Fiscal code to retrieve digital domicile for")
-    parser.add_argument('--fiscal_codes_file', type=str, required=False, help="Path to a file containing fiscal codes (one per line)")
+    parser.add_argument('--p_iva', type=str, required=False, help="P. Iva to retrieve digital domicile for")
+    parser.add_argument('--input_file', type=str, required=False, help="Path to the input Excel file containing fiscal codes and/or partite IVA")
     parser.add_argument('--fiscal_code_field', type=str, default='codice fiscale', help="Column name for fiscal codes in the Excel file")
+    parser.add_argument('--p_iva_field', type=str, default='codice fiscale',
+                        help="Column name for partite IVA in the Excel file")
     parser.add_argument('--pec_field', type=str, default='PEC', help="Column name for PEC in the Excel file")
     parser.add_argument('--output_file', type=str, required=False, help="Path to save the output Excel file with updated PECs")
     args = parser.parse_args()
     voucher = retrieve_voucher(args.priv_key_path)
-    if args.fiscal_code:
+    if args.fiscal_code is not None:
         domicilio = retrieve_domicilio_digitale(voucher, args.fiscal_code)
         print(f"Domicilio Digitale for {args.fiscal_code}: {domicilio}")
+    elif args.p_iva is not None:
+        domicilio = retrieve_domicilio_digitale(voucher, args.p_iva)
+        print(f"Domicilio Digitale for {args.p_iva}: {domicilio}")
     else:
-        fiscal_codes_file = args.fiscal_codes_file
+        input_file = args.input_file
         fiscal_code_field = args.fiscal_code_field
+        p_iva_field = args.p_iva_field
         pec_field = args.pec_field
         output_file = args.output_file
-        main(voucher=voucher, fiscal_codes_file=fiscal_codes_file, output_file=output_file, fiscal_code_field=fiscal_code_field, pec_field=pec_field)
+        main(voucher=voucher, input_file=input_file, output_file=output_file, fiscal_code_field=fiscal_code_field, p_iva_field=p_iva_field, pec_field=pec_field)

@@ -1,6 +1,41 @@
+# Environment and credentials
 .env
+*.pem
+*.key
+
+# Python virtual environment
 .venv
+venv/
+ENV/
+
+# IDE
 .idea
+.vscode/
+*.swp
+*.swo
+
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+
+# Build and distribution
+dist/
+build/
+
+# Data files (Excel)
 *.xlsx
+*.xls
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db
